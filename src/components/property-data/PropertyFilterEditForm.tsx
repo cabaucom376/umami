@@ -1,13 +1,25 @@
 'use client';
-import { Button, Column, Grid, Icon, List, ListItem, Menu, MenuItem, MenuTrigger, Popover, Row } from '@umami/react-zen';
+import {
+  Button,
+  Column,
+  Grid,
+  Icon,
+  List,
+  ListItem,
+  Menu,
+  MenuItem,
+  MenuTrigger,
+  Popover,
+  Row,
+} from '@umami/react-zen';
 import { format } from 'date-fns';
 import { useState } from 'react';
 import { Empty } from '@/components/common/Empty';
 import { useMessages, useMobile, usePropertyFieldsQuery } from '@/components/hooks';
+import type { PropertyDataSource } from '@/components/hooks/queries/usePropertyFieldsQuery';
 import { Plus } from '@/components/icons';
 import { DATA_TYPE, OPERATORS } from '@/lib/constants';
 import type { PropertyFilter } from '@/lib/types';
-import type { PropertyDataSource } from '@/components/hooks/queries/usePropertyFieldsQuery';
 import { PropertyFilterRecord } from './PropertyFilterRecord';
 
 export function PropertyFilterEditForm({
@@ -60,7 +72,7 @@ export function PropertyFilterEditForm({
   };
 
   return (
-    <Column width={isMobile ? 'auto' : '700px'} gap="6">
+    <Column width={isMobile ? 'auto' : '800px'} gap="6">
       <Column minHeight="400px">
         <Grid columns={{ base: '1fr', md: '180px 1fr' }} overflow="hidden" gapY="6">
           <Row display={{ base: 'flex', md: 'none' }}>
@@ -76,7 +88,10 @@ export function PropertyFilterEditForm({
                   style={{ maxHeight: 'calc(100vh - 2rem)', overflowY: 'auto' }}
                 >
                   {(fields as any[]).map(field => (
-                    <MenuItem key={`${field.propertyName}:${field.dataType}`} id={field.propertyName}>
+                    <MenuItem
+                      key={`${field.propertyName}:${field.dataType}`}
+                      id={field.propertyName}
+                    >
                       {field.propertyName}
                     </MenuItem>
                   ))}

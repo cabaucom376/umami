@@ -1,8 +1,14 @@
-import { PrismaClient } from '@/generated/prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { readReplicas } from '@prisma/extension-read-replicas';
 import debug from 'debug';
-import { DATA_TYPE, DEFAULT_PAGE_SIZE, FILTER_COLUMNS, OPERATORS, SESSION_COLUMNS } from './constants';
+import { PrismaClient } from '@/generated/prisma/client';
+import {
+  DATA_TYPE,
+  DEFAULT_PAGE_SIZE,
+  FILTER_COLUMNS,
+  OPERATORS,
+  SESSION_COLUMNS,
+} from './constants';
 import { filtersObjectToArray } from './params';
 import type { Operator, PropertyFilter, QueryFilters, QueryOptions } from './types';
 
@@ -22,6 +28,46 @@ const PRISMA_LOG_OPTIONS = {
     },
   ],
 };
+
+export interface RawQueryExecutor {
+  $executeRawUnsafe: (query: string, ...params: any[]) => unknown;
+  $queryRawUnsafe: (query: string, ...params: any[]) => unknown;
+}
+
+export interface RawQueryClient extends RawQueryExecutor {
+  $primary?: () => unknown;
+  $replica?: () => unknown;
+}
+
+function isRawQueryExecutor(value: unknown): value is RawQueryExecutor {
+  return !!value && typeof value === 'object' && '$executeRawUnsafe' in value && '$queryRawUnsafe' in value;
+}
+
+export function getRawQueryClient(
+  client: RawQueryClient,
+  {
+    useReplica = false,
+    write = false,
+  }: {
+    useReplica?: boolean;
+    write?: boolean;
+  } = {},
+) {
+  if (write) {
+    const primary = typeof client.$primary === 'function' ? client.$primary() : null;
+    return isRawQueryExecutor(primary) ? primary : client;
+  }
+
+  if (useReplica && typeof client.$replica === 'function') {
+    const replica = client.$replica();
+
+    if (isRawQueryExecutor(replica)) {
+      return replica;
+    }
+  }
+
+  return client;
+}
 
 const DATE_FORMATS = {
   minute: 'YYYY-MM-DD HH24:MI:00',
@@ -68,7 +114,11 @@ function getDateSQL(field: string, unit: string, timezone?: string): string {
   return `to_char(date_trunc('${unit}', ${field}), '${DATE_FORMATS_UTC[unit]}')`;
 }
 
-function getDateStringSQL(field: string, unit: keyof typeof DATE_STRING_FORMATS = 'utc', timezone?: string): string {
+function getDateStringSQL(
+  field: string,
+  unit: keyof typeof DATE_STRING_FORMATS = 'utc',
+  timezone?: string,
+): string {
   if (timezone && !isUtcTimezone(timezone)) {
     return `to_char(${field} at time zone '${timezone}', '${DATE_STRING_FORMATS[unit]}')`;
   }
@@ -289,6 +339,8 @@ function getPropertyFilterQuery(
   const column = propertyType === 'event' ? 'website_event_id' : 'session_id';
   const outerColumn =
     propertyType === 'event' ? 'website_event.event_id' : 'website_event.session_id';
+  const dateFilter =
+    propertyType === 'event' ? `and created_at between {{startDate}} and {{endDate}}` : '';
 
   filters.forEach(({ propertyName, dataType, operator, value }, i) => {
     const keyParam = `pf_key_${i}`;
@@ -372,21 +424,38 @@ function getPropertyFilterQuery(
       }
     }
 
-    parts.push(`and ${outerColumn} in (
-      select ${column}
+    if (propertyType === 'session') {
+      parts.push(`and exists (
+      select 1
       from ${table}
-      where website_id = {{websiteId::uuid}}
-        and created_at between {{startDate}} and {{endDate}}
+      where website_id = website_event.website_id
+        and session_id = website_event.session_id
         and data_key = {{${keyParam}}}
         and data_type = ${dataType}
         and ${condition}
     )`);
+    } else {
+      parts.push(`and ${outerColumn} in (
+      select ${column}
+      from ${table}
+      where website_id = {{websiteId::uuid}}
+        ${dateFilter}
+        and data_key = {{${keyParam}}}
+        and data_type = ${dataType}
+        and ${condition}
+    )`);
+    }
   });
 
   return { sql: parts.join('\n'), params };
 }
 
-async function rawQuery(sql: string, data: Record<string, any>, name?: string): Promise<any> {
+async function executeRawQuery(
+  sql: string,
+  data: Record<string, any>,
+  name?: string,
+  write = false,
+): Promise<any> {
   if (process.env.LOG_QUERY) {
     log('QUERY:\n', sql);
     log('PARAMETERS:\n', data);
@@ -394,10 +463,6 @@ async function rawQuery(sql: string, data: Record<string, any>, name?: string): 
   }
   const params = [];
   const schema = getSchema();
-
-  if (schema) {
-    await client.$executeRawUnsafe(`SET search_path TO "${schema}";`);
-  }
 
   const query = sql?.replaceAll(/\{\{\s*(\w+)(::\w+)?\s*}}/g, (...args) => {
     const [, name, type] = args;
@@ -409,10 +474,24 @@ async function rawQuery(sql: string, data: Record<string, any>, name?: string): 
     return `$${params.length}${type ?? ''}`;
   });
 
-  if (process.env.DATABASE_REPLICA_URL && '$replica' in client) {
-    return client.$replica().$queryRawUnsafe(query, ...params);
+  const queryClient = getRawQueryClient(client, {
+    useReplica: !!process.env.DATABASE_REPLICA_URL,
+    write,
+  });
+
+  if (schema) {
+    await queryClient.$executeRawUnsafe(`SET search_path TO "${schema}";`);
   }
-  return client.$queryRawUnsafe(query, ...params);
+
+  return queryClient.$queryRawUnsafe(query, ...params);
+}
+
+async function rawQuery(sql: string, data: Record<string, any>, name?: string): Promise<any> {
+  return executeRawQuery(sql, data, name);
+}
+
+async function writeRawQuery(sql: string, data: Record<string, any>, name?: string): Promise<any> {
+  return executeRawQuery(sql, data, name, true);
 }
 
 async function pagedQuery<T>(model: string, criteria: T, filters?: QueryFilters) {
@@ -456,13 +535,22 @@ async function pagedRawQuery(
     .filter(n => n)
     .join('\n');
 
-  const count = await rawQuery(`select count(*) as num from (${query}) t`, queryParams).then(
-    res => res[0].num,
-  );
+  const { maxResults } = filters;
+  const countQuery = maxResults
+    ? `select count(*) as num from (select 1 from (${query}) t limit ${+maxResults}) t2`
+    : `select count(*) as num from (${query}) t`;
 
+  const count = await rawQuery(countQuery, queryParams).then(res => Number(res[0].num));
   const data = await rawQuery(`${query}${statements}`, queryParams, name);
 
-  return { data, count, page: +page, pageSize: size, orderBy };
+  return {
+    data,
+    count,
+    page: +page,
+    pageSize: size,
+    orderBy,
+    isCapped: !!maxResults && +count >= +maxResults,
+  };
 }
 
 function getSearchParameters(query: string, filters: Record<string, any>[]) {
@@ -580,4 +668,5 @@ export default {
   pagedRawQuery,
   parseFilters,
   rawQuery,
+  writeRawQuery,
 };

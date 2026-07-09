@@ -20,6 +20,7 @@ export interface Auth {
     isAdmin: boolean;
   };
   shareToken?: {
+    shareType?: number;
     websiteId?: string;
     websiteIds?: string[];
     boardId?: string;
@@ -27,7 +28,16 @@ export interface Auth {
     pixelIds?: string[];
     linkId?: string;
     linkIds?: string[];
+    parameters?: ShareParameters;
   };
+}
+
+export type ShareTheme = 'light' | 'dark';
+
+export interface ShareParameters {
+  allowFilter?: boolean;
+  theme?: ShareTheme;
+  [key: string]: boolean | ShareTheme | undefined;
 }
 
 export interface PropertyFilter {
@@ -89,11 +99,6 @@ export interface SessionDataPivotRow {
   propertyValues: string[];
 }
 
-export interface PropertyCardinalityBucket {
-  label: string;
-  count: number;
-}
-
 export interface PropertyLeaderboardRow {
   label: string;
   activity: number;
@@ -101,9 +106,6 @@ export interface PropertyLeaderboardRow {
   visits: number;
   views: number;
   events: number;
-  totaltime: number;
-  newSessions: number;
-  returningSessions: number;
 }
 
 export interface QueryOptions {
@@ -122,6 +124,7 @@ export interface QueryFilters
     SortParams,
     PageParams,
     SegmentParams {
+  minDuration?: number;
   cohortFilters?: QueryFilters;
 }
 
@@ -165,6 +168,7 @@ export interface SortParams {
 export interface PageParams {
   page?: number;
   pageSize?: number;
+  maxResults?: number;
 }
 
 export interface SegmentParams {
@@ -180,6 +184,7 @@ export interface PageResult<T> {
   orderBy?: string;
   sortDescending?: boolean;
   search?: string;
+  isCapped?: boolean;
 }
 
 export interface RealtimeData {

@@ -1,7 +1,7 @@
-import { CLICKHOUSE } from '@/lib/db';
 import { type ClickHouseClient, createClient } from '@clickhouse/client';
 import { formatInTimeZone } from 'date-fns-tz';
 import debug from 'debug';
+import { CLICKHOUSE } from '@/lib/db';
 import { DATA_TYPE, DEFAULT_PAGE_SIZE, FILTER_COLUMNS, OPERATORS } from './constants';
 import { filtersObjectToArray } from './params';
 import type { Operator, PropertyFilter, QueryFilters, QueryOptions } from './types';
@@ -79,7 +79,13 @@ function getSearchSQL(column: string, param: string = 'search'): string {
   return `and positionCaseInsensitive(${column}, {${param}:String}) > 0`;
 }
 
-function mapFilter(column: string, operator: Operator, name: string, type: string = 'String', paramName?: string) {
+function mapFilter(
+  column: string,
+  operator: Operator,
+  name: string,
+  type: string = 'String',
+  paramName?: string,
+) {
   const param = paramName ?? name;
   const value = `{${param}:${type}}`;
 
@@ -253,6 +259,10 @@ function getPropertyFilterQuery(
   const table = propertyType === 'event' ? 'event_data' : 'session_data final';
   const column = propertyType === 'event' ? 'event_id' : 'session_id';
   const outerColumn = propertyType === 'event' ? 'event_id' : 'website_event.session_id';
+  const dateFilter =
+    propertyType === 'event'
+      ? `and created_at between {startDate:DateTime64} and {endDate:DateTime64}`
+      : '';
 
   filters.forEach(({ propertyName, dataType, operator, value }, i) => {
     const keyParam = `pf_key_${i}`;
@@ -333,15 +343,26 @@ function getPropertyFilterQuery(
       }
     }
 
-    parts.push(`and ${outerColumn} in (
-      select ${column}
+    if (propertyType === 'session') {
+      parts.push(`and tuple(website_event.website_id, website_event.session_id) in (
+      select website_id, session_id
       from ${table}
       where website_id = {websiteId:UUID}
-        and created_at between {startDate:DateTime64} and {endDate:DateTime64}
         and data_key = {${keyParam}:String}
         and data_type = ${dataType}
         and ${condition}
     )`);
+    } else {
+      parts.push(`and ${outerColumn} in (
+      select ${column}
+      from ${table}
+      where website_id = {websiteId:UUID}
+        ${dateFilter}
+        and data_key = {${keyParam}:String}
+        and data_type = ${dataType}
+        and ${condition}
+    )`);
+    }
   });
 
   return { sql: parts.join('\n'), params };
@@ -365,13 +386,23 @@ async function pagedRawQuery(
     .filter(n => n)
     .join('\n');
 
-  const count = await rawQuery(`select count(*) as num from (${query}) t`, queryParams).then(
-    res => res[0].num,
-  );
+  const { maxResults } = filters;
+  const countQuery = maxResults
+    ? `select count(*) as num from (select 1 from (${query}) t limit ${+maxResults}) t2`
+    : `select count(*) as num from (${query}) t`;
 
+  const count = await rawQuery(countQuery, queryParams).then(res => res[0].num);
   const data = await rawQuery(`${query}${statements}`, queryParams, name);
 
-  return { data, count, page: +page, pageSize: size, orderBy, search };
+  return {
+    data,
+    count,
+    page: +page,
+    pageSize: size,
+    orderBy,
+    search,
+    isCapped: !!maxResults && +count >= +maxResults,
+  };
 }
 
 async function rawQuery<T = unknown>(
